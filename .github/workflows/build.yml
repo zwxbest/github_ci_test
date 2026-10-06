@@ -1,0 +1,95 @@
+name: Java CI
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 拉取代码
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. 配置 JDK
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '8'
+          distribution: 'temurin'
+          cache: maven
+
+      # 3. 运行测试 + 打 WAR
+      - name: Test and Package
+        run: mvn clean package
+
+      # 4. 测试摘要：直接写进运行页首屏，不用下载就能看结果
+      #    加了 if: always()，测试挂了也能看到失败详情
+      - name: Test summary
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import csv, glob, os, xml.etree.ElementTree as ET
+
+          lines = ["## 测试结果", ""]
+          rows, total = [], [0, 0, 0, 0]  # 用例 / 失败 / 错误 / 跳过
+
+          for path in sorted(glob.glob("target/surefire-reports/TEST-*.xml")):
+              root = ET.parse(path).getroot()
+              n = [int(root.get(k, 0)) for k in ("tests", "failures", "errors", "skipped")]
+              total = [a + b for a, b in zip(total, n)]
+              icon = "✅" if n[1] + n[2] == 0 else "❌"
+              rows.append(f"| {icon} | `{root.get('name')}` | {n[0]} | {n[1]} | {n[2]} | {n[3]} |")
+
+          if rows:
+              lines.append(f"**共 {total[0]} 个用例**：失败 {total[1]}，错误 {total[2]}，跳过 {total[3]}")
+              lines.append("")
+              lines += [
+                  "| 结果 | 测试类 | 用例 | 失败 | 错误 | 跳过 |",
+                  "|:---:|---|---:|---:|---:|---:|",
+                  *rows,
+              ]
+          else:
+              lines.append("⚠️ 没找到 surefire 报告（测试可能没执行）。")
+
+          # 覆盖率：读 jacoco.csv 统计行覆盖率
+          csv_path = "target/site/jacoco/jacoco.csv"
+          if os.path.exists(csv_path):
+              missed = covered = 0
+              with open(csv_path, newline="", encoding="utf-8") as fh:
+                  for row in csv.DictReader(fh):
+                      missed += int(row["LINE_MISSED"])
+                      covered += int(row["LINE_COVERED"])
+              if missed + covered:
+                  pct = covered * 100.0 / (missed + covered)
+                  lines += ["", f"**行覆盖率**：{pct:.1f}%（{covered}/{missed + covered}）"]
+
+          print("\n".join(lines))
+          PY
+
+      # 5. 测试报告（JUnit XML + 每个用例的明细）
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: target/surefire-reports/
+
+      # 6. 覆盖率报告（HTML，下载后打开 index.html）
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: target/site/jacoco/
+
+      # 7. 保存 WAR 包（构建成功才存在，所以不加 if: always()）
+      - name: Upload WAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: springmvc-war
+          path: target/*.war
